@@ -11,6 +11,13 @@ const __filename=fileURLToPath(import.meta.url),__dirname=path.dirname(__filenam
 const esc=v=>String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const money=n=>`₹${Number(n).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 
+async function supabaseUser(accessToken){
+  const url=process.env.SUPABASE_URL,anon=process.env.SUPABASE_ANON_KEY;
+  if(!url||!anon||!accessToken)return null;
+  const r=await fetch(`${url}/auth/v1/user`,{headers:{apikey:anon,Authorization:`Bearer ${accessToken}`}});
+  if(!r.ok)return null; return await r.json();
+}
+
 function makePdf(info){
   return new Promise((resolve,reject)=>{
     const doc=new PDFDocument({size:"A4",margin:45}),chunks=[];
@@ -36,6 +43,8 @@ export async function POST(request){
  try{
   const body=await request.json();
   const {razorpay_order_id,razorpay_payment_id,razorpay_signature,serviceIds,serviceId,addonIds=[],customer={},receipt}=body;
+  const accessToken=String(request.headers.get("authorization")||"").replace(/^Bearer\s+/i,"");
+  const authUser=await supabaseUser(accessToken);
   if(!razorpay_order_id||!razorpay_payment_id||!razorpay_signature)return json({error:"Payment verification details are incomplete."},400);
   const secret=process.env.RAZORPAY_KEY_SECRET,keyId=process.env.RAZORPAY_KEY_ID;
   if(!secret||!keyId)return json({error:"Razorpay server configuration is missing."},500);
@@ -52,8 +61,15 @@ export async function POST(request){
   if(Number(payment.amount)!==Math.round(charges.total*100))return json({error:"Payment amount does not match the verified order."},400);
   const info={receipt:receipt||`SRJ-${Date.now()}`,customer:{name:String(customer.name||"").slice(0,100),email:String(customer.email||"").slice(0,150),phone:String(customer.phone||"").slice(0,40),business:String(customer.business||"").slice(0,150),notes:String(customer.notes||"").slice(0,3000),instagram:String(customer.instagram||"").slice(0,150),twitter:String(customer.twitter||"").slice(0,150),facebook:String(customer.facebook||"").slice(0,150),otherSocial:String(customer.otherSocial||"").slice(0,200)},services,addons,subtotal,charges,discountPercent:dp,luckyName:order.notes?.lucky_name||customer.name,paymentId:razorpay_payment_id,orderId:razorpay_order_id,paymentMethod:payment.method};
   const pdf=await makePdf(info);
-  const resendKey=process.env.RESEND_API_KEY,from=process.env.RESEND_FROM_EMAIL||"alertaiq6@gmail.com",admin=process.env.ADMIN_NOTIFICATION_EMAIL||"sumitdixit240@gmail.com";
-  if(!resendKey)return json({ok:true,emailSent:false,emailError:"RESEND_API_KEY is missing in Vercel environment variables.",receipt:info},200);
+  // Persist the captured order when Supabase is configured. The service-role key stays server-side.
+  const supaUrl=process.env.SUPABASE_URL,supaKey=process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if(supaUrl&&supaKey){
+    const orderPayload={order_code:info.receipt,user_id:authUser?.id||null,customer_email:info.customer.email,customer_name:info.customer.name,service_snapshot:info.services,addon_snapshot:info.addons,subtotal:info.subtotal,total:info.charges.total,razorpay_order_id:info.orderId,razorpay_payment_id:info.paymentId,payment_status:"captured"};
+    const db=await fetch(`${supaUrl}/rest/v1/orders`,{method:"POST",headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify(orderPayload)});
+    if(!db.ok){const t=await db.text();console.error("Supabase order insert failed",t);}
+  }
+  const resendKey=process.env.RESEND_API_KEY,from=process.env.RESEND_FROM_EMAIL,admin=process.env.ADMIN_NOTIFICATION_EMAIL||"sumitdixit240@gmail.com";
+  if(!resendKey||!from)return json({ok:true,emailSent:false,receipt:info},200);
   const attachments=[{filename:`SRIJAN-Receipt-${info.receipt}.pdf`,content:pdf.toString("base64")}];
   const serviceRows=info.services.map(s=>`<li>${esc(s.name)} — ${money(s.price)} · ${esc(s.delivery)}</li>`).join("");
   const addonRows=info.addons.length?info.addons.map(a=>`<li>${esc(a.name)} — ${money(a.price)} · ${esc(a.delivery)}</li>`).join(""):`<li>No add-ons selected</li>`;
@@ -61,7 +77,7 @@ export async function POST(request){
   const adminHtml=`<div style="font-family:Arial,sans-serif;max-width:720px;color:#172033;line-height:1.6"><div style="background:#08101d;padding:24px;border-radius:16px;color:white"><div style="font-size:30px;font-weight:800;color:#fbbf24">SRIJAN.</div><div style="color:#94a3b8">NEW WORK RECEIVED</div></div><h2>New paid work has arrived</h2><p>A customer has completed payment. Please review the submitted requirements and begin follow-up.</p><h3>Customer</h3><p><b>Name:</b> ${esc(info.customer.name)}<br><b>Email:</b> ${esc(info.customer.email)}<br><b>Phone:</b> ${esc(info.customer.phone)}<br><b>Business:</b> ${esc(info.customer.business)}<br><b>Requirements:</b> ${esc(info.customer.notes||"Not provided")}</p><h3>Order</h3><ul>${serviceRows}</ul><h3>Add-ons</h3><ul>${addonRows}</ul><p><b>Total paid:</b> ${money(info.charges.total)}<br><b>Payment ID:</b> ${esc(info.paymentId)}<br><b>Order ID:</b> ${esc(info.orderId)}</p><p>Customer receipt is attached for reference.</p></div>`;
   const send=async(to,subject,html)=>{const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${resendKey}`},body:JSON.stringify({from,to,reply_to:"alertaiq6@gmail.com",subject,html,attachments})});return {ok:r.ok,data:await r.json()};};
   const [customerMail,adminMail]=await Promise.all([send(info.customer.email,`SRIJAN — Payment receipt ${info.receipt}`,customerHtml),send(admin,`SRIJAN — New paid work: ${info.customer.business}`,adminHtml)]);
-  return json({ok:true,emailSent:customerMail.ok&&adminMail.ok,customerEmailSent:customerMail.ok,adminEmailSent:adminMail.ok,customerEmailError:customerMail.ok?null:(customerMail.data?.message||customerMail.data?.error||customerMail.data),adminEmailError:adminMail.ok?null:(adminMail.data?.message||adminMail.data?.error||adminMail.data),from,admin,receipt:info});
+  return json({ok:true,emailSent:customerMail.ok&&adminMail.ok,customerEmailSent:customerMail.ok,adminEmailSent:adminMail.ok,receipt:info});
  }catch(e){console.error("verify-payment",e);return json({error:"Payment was received but receipt processing needs attention. Please contact alertaiq6@gmail.com."},500)}
 }
 export async function OPTIONS(){return new Response(null,{status:204,headers:{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"POST, OPTIONS"}})}
