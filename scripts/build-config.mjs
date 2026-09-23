@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const rootDir = process.cwd();
+const outputDir = path.join(rootDir, "public");
+
 const url = process.env.SUPABASE_URL;
 const key =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
@@ -12,10 +15,10 @@ if (!url || !key) {
   );
 }
 
-const rootDir = process.cwd();
-const outputDir = path.join(rootDir, "public");
+// -----------------------------------------
+// 1. Remove previous production build
+// -----------------------------------------
 
-// Remove old build
 if (fs.existsSync(outputDir)) {
   fs.rmSync(outputDir, {
     recursive: true,
@@ -23,45 +26,56 @@ if (fs.existsSync(outputDir)) {
   });
 }
 
-// Create output directory
+// -----------------------------------------
+// 2. Create public directory
+// -----------------------------------------
+
 fs.mkdirSync(outputDir, {
   recursive: true
 });
 
-// Files to copy from project root
-const filesToCopy = [
+// -----------------------------------------
+// 3. Copy root website files
+// -----------------------------------------
+
+const rootFiles = [
   "index.html",
   "about.html",
-  "services.html",
+  "admin.html",
+  "auth.html",
   "contact.html",
+  "dashboard.html",
   "faq.html",
-  "login.html",
-  "signup.html"
+  "pay.html",
+  "services.html",
+  "work.html",
+  "app.js",
+  "auth.js",
+  "styles.css",
+  "README.md"
 ];
 
-// Copy HTML files if they exist
-for (const file of filesToCopy) {
+for (const file of rootFiles) {
   const source = path.join(rootDir, file);
+  const destination = path.join(outputDir, file);
 
   if (fs.existsSync(source)) {
-    fs.copyFileSync(
-      source,
-      path.join(outputDir, file)
-    );
+    fs.copyFileSync(source, destination);
+    console.log(`Copied: ${file}`);
   }
 }
 
-// Directories to copy
-const directoriesToCopy = [
+// -----------------------------------------
+// 4. Copy important directories
+// -----------------------------------------
+
+const directories = [
   "assets",
-  "css",
-  "js",
-  "images",
-  "img",
-  "fonts"
+  "src",
+  "demos"
 ];
 
-for (const directory of directoriesToCopy) {
+for (const directory of directories) {
   const source = path.join(rootDir, directory);
   const destination = path.join(outputDir, directory);
 
@@ -70,10 +84,15 @@ for (const directory of directoriesToCopy) {
       recursive: true,
       force: true
     });
+
+    console.log(`Copied directory: ${directory}`);
   }
 }
 
-// Generate Supabase configuration
+// -----------------------------------------
+// 5. Generate Supabase configuration
+// -----------------------------------------
+
 const supabaseConfig = `// Generated automatically during production build.
 // Do not commit real secrets.
 
@@ -93,8 +112,36 @@ fs.writeFileSync(
   "utf8"
 );
 
-console.log("=================================");
-console.log("SRIJAN production build complete");
-console.log("=================================");
-console.log(`Output directory: ${outputDir}`);
-console.log("Supabase configuration generated.");
+console.log("Generated: supabase-config.js");
+
+// -----------------------------------------
+// 6. Verify required files
+// -----------------------------------------
+
+const requiredFiles = [
+  "index.html",
+  "styles.css",
+  "app.js",
+  "supabase-config.js"
+];
+
+for (const file of requiredFiles) {
+  const filePath = path.join(outputDir, file);
+
+  if (!fs.existsSync(filePath)) {
+    throw new Error(
+      `Production build failed: ${file} was not created.`
+    );
+  }
+}
+
+// -----------------------------------------
+// 7. Build completed
+// -----------------------------------------
+
+console.log("");
+console.log("======================================");
+console.log(" SRIJAN PRODUCTION BUILD SUCCESSFUL");
+console.log("======================================");
+console.log(`Output: ${outputDir}`);
+console.log("");
