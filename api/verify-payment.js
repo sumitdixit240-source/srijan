@@ -5,18 +5,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { calculate, calculateCharges } from "./catalog.js";
+async function supabaseUser(accessToken){const url=process.env.SUPABASE_URL,key=process.env.SUPABASE_PUBLISHABLE_KEY||process.env.SUPABASE_ANON_KEY;if(!url||!key||!accessToken)return null;const r=await fetch(`${url}/auth/v1/user`,{headers:{apikey:key,Authorization:`Bearer ${accessToken}`}});return r.ok?r.json():null}
 
-const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"}});
+const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 const __filename=fileURLToPath(import.meta.url),__dirname=path.dirname(__filename);
 const esc=v=>String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const money=n=>`₹${Number(n).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-
-async function supabaseUser(accessToken){
-  const url=process.env.SUPABASE_URL,anon=process.env.SUPABASE_ANON_KEY;
-  if(!url||!anon||!accessToken)return null;
-  const r=await fetch(`${url}/auth/v1/user`,{headers:{apikey:anon,Authorization:`Bearer ${accessToken}`}});
-  if(!r.ok)return null; return await r.json();
-}
 
 function makePdf(info){
   return new Promise((resolve,reject)=>{
@@ -50,23 +44,39 @@ export async function POST(request){
   if(!secret||!keyId)return json({error:"Razorpay server configuration is missing."},500);
   const expected=crypto.createHmac("sha256",secret).update(`${razorpay_order_id}|${razorpay_payment_id}`).digest("hex");
   if(expected.length!==String(razorpay_signature).length||!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(String(razorpay_signature))))return json({error:"Payment signature verification failed."},400);
-  const ids=Array.isArray(serviceIds)?serviceIds:(serviceId?[serviceId]:[]);
-  const {services,addons,subtotal}=calculate(ids,Array.isArray(addonIds)?addonIds:[]);
   const razorpay=new Razorpay({key_id:keyId,key_secret:secret});
   const payment=await razorpay.payments.fetch(razorpay_payment_id);const order=await razorpay.orders.fetch(razorpay_order_id);
+  const supaUrl=process.env.SUPABASE_URL,supaKey=process.env.SUPABASE_SECRET_KEY||process.env.SUPABASE_SERVICE_ROLE_KEY;
+  let dbOrder=null;
+  if(supaUrl&&supaKey){const qr=await fetch(`${supaUrl}/rest/v1/orders?select=*&razorpay_order_id=eq.${encodeURIComponent(razorpay_order_id)}&limit=1`,{headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`}});if(qr.ok){const rows=await qr.json();dbOrder=rows[0]||null;}}
+  if(dbOrder?.payment_status==='captured'&&dbOrder.razorpay_payment_id===razorpay_payment_id)return json({ok:true,alreadyProcessed:true,emailSent:true});
+  const services=[...(dbOrder?.service_snapshot||[])];const addons=[...(dbOrder?.addon_snapshot||[])];let subtotal=Number(dbOrder?.subtotal||0);
+  if(!services.length){const ids=Array.isArray(serviceIds)?serviceIds:(serviceId?[serviceId]:[]);const calculated=await calculate(ids,Array.isArray(addonIds)?addonIds:[]);services.push(...calculated.services);addons.push(...calculated.addons);subtotal=calculated.subtotal;}
   const dp=Number(order?.notes?.discount_percent);if(!Number.isFinite(dp)||dp<0.5||dp>2)return json({error:"Verified order discount is invalid."},400);
   const charges=calculateCharges(subtotal,dp);
   if(payment.order_id!==razorpay_order_id||order.id!==razorpay_order_id)return json({error:"Payment order mismatch."},400);
   if(payment.status!=="captured")return json({error:`Payment is ${payment.status}. Receipt will be issued after capture.`},400);
   if(Number(payment.amount)!==Math.round(charges.total*100))return json({error:"Payment amount does not match the verified order."},400);
+  if(dbOrder?.total&&Math.round(Number(dbOrder.total)*100)!==Number(payment.amount))return json({error:"Stored order total does not match the captured payment."},400);
   const info={receipt:receipt||`SRJ-${Date.now()}`,customer:{name:String(customer.name||"").slice(0,100),email:String(customer.email||"").slice(0,150),phone:String(customer.phone||"").slice(0,40),business:String(customer.business||"").slice(0,150),notes:String(customer.notes||"").slice(0,3000),instagram:String(customer.instagram||"").slice(0,150),twitter:String(customer.twitter||"").slice(0,150),facebook:String(customer.facebook||"").slice(0,150),otherSocial:String(customer.otherSocial||"").slice(0,200)},services,addons,subtotal,charges,discountPercent:dp,luckyName:order.notes?.lucky_name||customer.name,paymentId:razorpay_payment_id,orderId:razorpay_order_id,paymentMethod:payment.method};
   const pdf=await makePdf(info);
-  // Persist the captured order when Supabase is configured. The service-role key stays server-side.
-  const supaUrl=process.env.SUPABASE_URL,supaKey=process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Mark the pre-created order as captured and create the initial project timeline.
   if(supaUrl&&supaKey){
-    const orderPayload={order_code:info.receipt,user_id:authUser?.id||null,customer_email:info.customer.email,customer_name:info.customer.name,service_snapshot:info.services,addon_snapshot:info.addons,subtotal:info.subtotal,total:info.charges.total,razorpay_order_id:info.orderId,razorpay_payment_id:info.paymentId,payment_status:"captured"};
-    const db=await fetch(`${supaUrl}/rest/v1/orders`,{method:"POST",headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify(orderPayload)});
-    if(!db.ok){const t=await db.text();console.error("Supabase order insert failed",t);}
+    if(dbOrder?.id){
+      const db=await fetch(`${supaUrl}/rest/v1/orders?id=eq.${encodeURIComponent(dbOrder.id)}`,{method:'PATCH',headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({razorpay_payment_id:info.paymentId,payment_status:'captured',updated_at:new Date().toISOString()})});
+      if(!db.ok)console.error('Supabase order update failed',await db.text());
+    }
+    const projectCode=`SRJ-PRJ-${Date.now().toString(36).toUpperCase()}`;
+    const projectPayload={project_code:projectCode,user_id:dbOrder?.user_id||authUser?.id||null,order_id:dbOrder?.id||null,title:info.services.map(x=>x.name).join(' + ').slice(0,150),status:'active',progress:5};
+    const pr=await fetch(`${supaUrl}/rest/v1/projects`,{method:'POST',headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(projectPayload)});
+    if(pr.ok){
+      const rows=await pr.json();const projectId=rows[0]?.id;
+      if(projectId){
+        const milestones=['Requirements confirmed','Design / development','Integration & functionality','Testing & revisions','Deployment','Final delivery'];
+        await fetch(`${supaUrl}/rest/v1/project_milestones`,{method:'POST',headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify(milestones.map((title,i)=>({project_id:projectId,title,progress:i===0?100:0,status:i===0?'completed':'pending',sort_order:i})))});
+        if(projectPayload.user_id)await fetch(`${supaUrl}/rest/v1/notifications`,{method:'POST',headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({user_id:projectPayload.user_id,title:'Payment confirmed',message:`Your payment ${info.paymentId} was verified. Project ${projectCode} has been created.`,created_at:new Date().toISOString()})});
+      }
+    }
   }
   const resendKey=process.env.RESEND_API_KEY,from=process.env.RESEND_FROM_EMAIL,admin=process.env.ADMIN_NOTIFICATION_EMAIL||"sumitdixit240@gmail.com";
   if(!resendKey||!from)return json({ok:true,emailSent:false,receipt:info},200);

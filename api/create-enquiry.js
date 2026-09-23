@@ -1,10 +1,10 @@
 import { calculate } from "./catalog.js";
-const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"POST, OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"}});
+const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 const esc=v=>String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const money=n=>`₹${Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 function code(){return `SRJ-ENQ-${new Date().toISOString().slice(0,10).replaceAll('-','')}-${Math.random().toString(36).slice(2,7).toUpperCase()}`}
 async function supabaseUser(accessToken){
-  const url=process.env.SUPABASE_URL,anon=process.env.SUPABASE_ANON_KEY;
+  const url=process.env.SUPABASE_URL,anon=process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY;
   if(!url||!anon||!accessToken)return null;
   const r=await fetch(`${url}/auth/v1/user`,{headers:{apikey:anon,Authorization:`Bearer ${accessToken}`}});
   if(!r.ok)return null; return await r.json();
@@ -12,16 +12,17 @@ async function supabaseUser(accessToken){
 export async function POST(request){
  try{
   const body=await request.json(); const customer=body.customer||{};
+    if(JSON.stringify(body).length>120000) return json({error:"Request is too large."},413);
   const serviceIds=Array.isArray(body.serviceIds)?body.serviceIds:body.serviceId?[body.serviceId]:[];
   const addonIds=Array.isArray(body.addonIds)?body.addonIds:[];
-  const {services,addons,subtotal}=calculate(serviceIds,addonIds);
+  const {services,addons,subtotal}=await calculate(serviceIds,addonIds);
   if(!customer.name||!customer.email||!customer.phone||!customer.business)return json({error:"Name, email, phone and business name are required."},400);
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(customer.email)))return json({error:"Please enter a valid email address."},400);
   const enquiryCode=code();
   const token=String(request.headers.get("authorization")||"").replace(/^Bearer\s+/i,"");
   const authUser=await supabaseUser(token);
   const userId=authUser?.id||null;
-  const supaUrl=process.env.SUPABASE_URL,supaKey=process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supaUrl=process.env.SUPABASE_URL,supaKey=process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   if(supaUrl&&supaKey){
     const payload={enquiry_code:enquiryCode,user_id:userId,customer_name:String(customer.name).slice(0,100),customer_email:String(customer.email).slice(0,150),customer_phone:String(customer.phone).slice(0,40),business_name:String(customer.business).slice(0,150),notes:String(customer.notes||"").slice(0,3000),service_ids:serviceIds,addon_ids:addonIds,service_snapshot:services,addon_snapshot:addons,estimated_value:subtotal,status:"new"};
     const r=await fetch(`${supaUrl}/rest/v1/enquiries`,{method:"POST",headers:{apikey:supaKey,Authorization:`Bearer ${supaKey}`,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify(payload)});

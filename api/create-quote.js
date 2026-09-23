@@ -1,12 +1,13 @@
 import { calculate, calculateCharges } from "./catalog.js";
-const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"POST, OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"}});
+const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 export async function POST(request){
   try{
     const body=await request.json();
     const serviceIds=Array.isArray(body.serviceIds)?body.serviceIds:body.serviceId?[body.serviceId]:[];
     const addonIds=Array.isArray(body.addonIds)?body.addonIds:[];
     const customer=body.customer||{};
-    const {services,addons,subtotal}=calculate(serviceIds,addonIds);
+    if(JSON.stringify(body).length>120000) return json({error:"Request is too large."},413);
+    const {services,addons,subtotal}=await calculate(serviceIds,addonIds);
     if(!customer.name||!customer.email||!customer.phone||!customer.business)return json({error:"Name, email, phone and business name are required."},400);
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(customer.email)))return json({error:"Please enter a valid email address."},400);
     const discountPercent=Number((0.5+Math.random()*1.5).toFixed(2));
