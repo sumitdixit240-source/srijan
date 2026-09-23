@@ -1,42 +1,68 @@
-# SRIJAN Priority 1 setup
+# SRIJAN — deployment setup
 
-This version adds the Priority-1 MVP: service marketplace, free enquiry flow, Razorpay checkout foundation, email/password customer auth, customer dashboard, admin dashboard, server-side payment verification, and database-backed service/enquiry/order/project records.
+## 1. Supabase
+1. Create/open the Supabase project.
+2. Run `supabase-schema.sql` in SQL Editor.
+3. Run `supabase-seed.sql` once.
+4. Run `supabase-production-hardening.sql`.
+5. Authentication → Providers → enable Email/Password.
+6. Enable Google OAuth if you want Google login and add the exact production callback URL.
+7. Authentication → URL Configuration → add your exact production site URL and `https://YOUR-DOMAIN/auth.html`.
+8. Create your first admin user. Then promote it in SQL:
+   `update public.profiles set role='super_admin', status='active' where email='YOUR_ADMIN_EMAIL';`
+9. Review Database → Security Advisor. Supabase recommends RLS on all exposed tables, SSL enforcement and MFA for administrative access.
 
-## 1. Create Supabase project
-1. Create a Supabase project.
-2. In Authentication > Providers, enable Email.
-3. In Authentication > URL Configuration, add your deployed SRIJAN URL (for example `https://your-domain.com`) and `https://your-domain.com/auth.html` as appropriate redirect URLs.
-4. Open SQL Editor and run `supabase-schema.sql`.
-5. Run `supabase-seed.sql`.
-6. Create your first account through `auth.html`.
-7. In SQL Editor, promote that account: `update public.profiles set role='super_admin' where email='YOUR_ADMIN_EMAIL';`
+## 2. Browser configuration
+For local development, edit `supabase-config.js` with only:
+- `SUPABASE_URL`
+- `SUPABASE_PUBLISHABLE_KEY`
 
-## 2. Configure browser auth
-Edit `supabase-config.js` and put only the Supabase Project URL and anon/publishable key there. These are browser-safe public values when RLS is correctly configured.
+For Vercel production, the build script generates `supabase-config.js` from the environment automatically. Do not commit real credentials.
 
-Never put a Supabase service-role key in frontend code.
+## 3. Vercel environment variables
+Add these to Production, Preview and Development as appropriate:
 
-## 3. Existing payment/email environment variables
-Keep these in Vercel Project Settings > Environment Variables:
+- `SUPABASE_URL`
+- `SUPABASE_PUBLISHABLE_KEY`
+- `SUPABASE_SECRET_KEY`
 - `RAZORPAY_KEY_ID`
 - `RAZORPAY_KEY_SECRET`
 - `RESEND_API_KEY`
-- `RESEND_FROM_EMAIL` (use a verified Resend sender/domain)
+- `RESEND_FROM_EMAIL`
 - `ADMIN_NOTIFICATION_EMAIL`
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY` (server-only; never expose it in browser code)
+- `CONTACT_TO_EMAIL` (optional; falls back to admin email)
+- `APP_ORIGIN` = exact production URL
 
-## 4. Priority-1 customer flow
-Services → select package/add-ons → enter customer details → free enquiry or Razorpay payment → server verification → receipt/email → dashboard records.
+Supabase's current API-key guidance is to use publishable keys in browser code and secret keys only in server-controlled components. Legacy `anon`/`service_role` keys are being phased out during 2026.
 
-The current payment API remains the authoritative place for Razorpay secret/signature/amount/status checks.
+## 4. Razorpay
+Start with test keys. Verify:
+- successful payment
+- failed/cancelled payment
+- amount verification
+- receipt generation
+- order record
+- project creation
+- dashboard visibility
 
-## 5. Security checklist before production
-- HTTPS only
-- Supabase RLS enabled (included in SQL)
-- Strong admin password + MFA when you move to Priority 2
-- Never expose Razorpay secret, Resend API key or service-role key
-- Use a verified email sender
-- Restrict Supabase redirect URLs to your own domain
-- Keep dependencies updated
+Only then switch to live credentials.
+
+## 5. Resend
+Use a verified sender/domain. The sender must match the configured verified identity. Test both customer and admin emails.
+
+## 6. Deploy
+Push this folder to GitHub and import it into Vercel. Vercel runs `npm run build`, which writes the browser-safe Supabase configuration. Server API secrets remain in Vercel environment variables.
+
+## 7. Production security checklist
+- HTTPS enabled
+- Supabase RLS and Security Advisor reviewed
+- Supabase org/admin MFA enabled
+- Secret key never in frontend/Git
+- Razorpay secret never in frontend/Git
+- Resend key never in frontend/Git
+- Exact auth redirect URLs only
+- Verified email sender/domain
+- Test keys used before live payment
+- Production domain set in `APP_ORIGIN`
+- Dependencies kept updated
+- Backups and recovery plan enabled
